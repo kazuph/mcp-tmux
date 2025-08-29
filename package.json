@@ -1,5 +1,5 @@
 {
-  "name": "tmux-mcp",
+  "name": "@kazuph/mcp-tmux",
   "version": "0.2.2",
   "description": "MCP Server for interfacing with tmux sessions",
   "type": "module",
@@ -8,11 +8,12 @@
     "build": "tsc",
     "start": "node build/index.js",
     "dev": "tsc -w",
-    "check-release": "npm run build && npm publish --dry-run",
-    "release": "npm run build && npm publish"
+    "prepublishOnly": "npm run build",
+    "check-release": "npm publish --dry-run",
+    "release": "npm publish"
   },
   "bin": {
-    "tmux-mcp": "build/index.js"
+    "mcp-tmux": "build/index.js"
   },
   "files": [
     "build"
@@ -22,7 +23,7 @@
     "tmux",
     "claude"
   ],
-  "author": "nickgnd",
+  "author": "kazuph",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.2",
@@ -34,12 +35,15 @@
     "@types/uuid": "^10.0.0",
     "typescript": "^5.3.3"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nickgnd/tmux-mcp.git"
+    "url": "git+https://github.com/kazuph/mcp-tmux.git"
   },
   "bugs": {
-    "url": "https://github.com/nickgnd/tmux-mcp/issues"
+    "url": "https://github.com/kazuph/mcp-tmux/issues"
   },
-  "homepage": "https://github.com/nickgnd/tmux-mcp#readme"
+  "homepage": "https://github.com/kazuph/mcp-tmux#readme"
 }
