@@ -607,13 +607,49 @@ server.resource(
   }
 );
 
+function showHelp() {
+  console.log(`
+tmux-mcp v0.2.2
+MCP Server for interfacing with tmux sessions
+
+USAGE:
+  tmux-mcp [OPTIONS]
+
+OPTIONS:
+  -s, --shell-type <TYPE>  Shell type to use for command execution
+                           Options: bash, zsh, fish
+                           Default: bash
+
+  -h, --help              Show this help message and exit
+
+DESCRIPTION:
+  A Model Context Protocol server that enables AI assistants to interact
+  with tmux sessions. Provides tools and resources for reading terminal
+  content, executing commands, and managing tmux sessions/windows/panes.
+
+EXAMPLES:
+  tmux-mcp                      # Start with default bash shell
+  tmux-mcp --shell-type=zsh     # Start with zsh shell type
+  tmux-mcp -s fish              # Start with fish shell type
+
+For more information, visit: https://github.com/nickgnd/tmux-mcp
+`);
+}
+
 async function main() {
   try {
     const { values } = parseArgs({
       options: {
-        'shell-type': { type: 'string', default: 'bash', short: 's' }
+        'shell-type': { type: 'string', default: 'bash', short: 's' },
+        'help': { type: 'boolean', short: 'h' }
       }
     });
+
+    // Show help if requested
+    if (values.help) {
+      showHelp();
+      process.exit(0);
+    }
 
     // Set shell configuration
     tmux.setShellConfig({
