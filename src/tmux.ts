@@ -272,25 +272,26 @@ export async function sendKeysToPane(
   text: string,
   options?: { enter?: boolean; delayMs?: number }
 ): Promise<void> {
-  const { enter = true, delayMs = 200 } = options ?? {};
+  const { enter = true, delayMs = 50 } = options ?? {};
   const wait = Math.max(delayMs, 0);
+  const escapedPane = escapeForTmux(paneId);
 
   const lines = text.split(/\r?\n/);
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' '${escapeForTmux(line)}'`);
+    await executeTmux(`send-keys -t '${escapedPane}' -- '${escapeForTmux(line)}'`);
 
     if (index < lines.length - 1) {
       await delay(wait);
-      await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+      await executeTmux(`send-keys -t '${escapedPane}' Enter`);
       await delay(wait);
     }
   }
 
   if (enter) {
     await delay(wait);
-    await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+    await executeTmux(`send-keys -t '${escapedPane}' Enter`);
     await delay(wait);
   }
 }
@@ -346,16 +347,18 @@ export async function executeCommand(paneId: string, command: string, rawMode?: 
 
     if (specialKeys.includes(fullCommand)) {
       // Send special key as-is
-      await executeTmux(`send-keys -t '${paneId}' ${fullCommand}`);
+      await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' ${fullCommand}`);
     } else {
       // For regular text, send each character individually to ensure proper processing
       // This handles both single characters (like 'q', 'f') and strings (like 'beam')
       for (const char of fullCommand) {
-        await executeTmux(`send-keys -t '${paneId}' '${char.replace(/'/g, "'\\''")}'`);
+        await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' -- '${escapeForTmux(char)}'`);
       }
     }
   } else {
-    await executeTmux(`send-keys -t '${paneId}' '${fullCommand.replace(/'/g, "'\\''")}' Enter`);
+    const escapedPane = escapeForTmux(paneId);
+    await executeTmux(`send-keys -t '${escapedPane}' -- '${escapeForTmux(fullCommand)}'`);
+    await executeTmux(`send-keys -t '${escapedPane}' Enter`);
   }
 
   return commandId;

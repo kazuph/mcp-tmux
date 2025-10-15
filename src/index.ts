@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
+import { stat } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as tmux from "./tmux.js";
 import * as git from "./git.js";
+import type { EnsureWorktreeResult } from "./git.js";
 
 const defaultAgentCommands = {
   codex: "codex",
@@ -34,6 +36,35 @@ function buildCdCommand(path: string): string {
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function directoryExists(path: string | undefined): Promise<boolean> {
+  if (!path) {
+    return false;
+  }
+
+  try {
+    const stats = await stat(path);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function normalizeAgentInput(text?: string): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  const normalized = text
+    .split(/\r?\n+/)
+    .map(segment => segment.trim())
+    .filter(segment => segment.length > 0)
+    .map(segment => segment.replace(/^[-*•]\s*/, '').replace(/\s+/g, ' '))
+    .join(' / ')
+    .trim();
+
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 // Create MCP server
@@ -531,7 +562,10 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push("Focused new pane");
       }
 
-      const inferredTitle = input.paneTitle ?? (input.agent ? `Agent | ${input.agent.toUpperCase()}` : undefined);
+      const inferredTitle = input.paneTitle
+        ?? (input.agentCommand ? `Agent | ${input.agentCommand.toUpperCase()}`
+          : input.agent ? `Agent | ${input.agent.toUpperCase()}`
+          : undefined);
       if (inferredTitle) {
         await tmux.renamePane(newPaneId, inferredTitle);
         operations.push(`Set pane title to \"${inferredTitle}\"`);
@@ -540,9 +574,10 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
       let workingDirectory = input.workingDirectory;
 
       let worktreeNotice: string | undefined;
+      let worktreeResult: EnsureWorktreeResult | undefined;
 
       if (input.worktree) {
-        const worktreeResult = await git.ensureWorktree({
+        worktreeResult = await git.ensureWorktree({
           repoPath: input.worktree.repoPath,
           branchName: input.worktree.branchName,
           worktreePath: input.worktree.worktreePath,
@@ -565,6 +600,44 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         worktreeNotice = `NOTE: このpaneは worktree '${worktreeResult.worktreePath}' (branch ${worktreeResult.branch}) 上で動作しています。親paneとは別ディレクトリです。`;
       }
 
+      const candidateDirectories = [
+        workingDirectory,
+        worktreeResult?.worktreePath
+      ].filter((value, index, array): value is string => Boolean(value) && array.indexOf(value) === index);
+
+      let resolvedWorkingDirectory: string | undefined;
+      const missingDirectories: string[] = [];
+
+      for (const candidate of candidateDirectories) {
+        if (await directoryExists(candidate)) {
+          resolvedWorkingDirectory = candidate;
+          break;
+        }
+        missingDirectories.push(candidate);
+      }
+
+      if (resolvedWorkingDirectory) {
+        workingDirectory = resolvedWorkingDirectory;
+      } else {
+        workingDirectory = undefined;
+      }
+
+      let workingDirectoryAgentNotice: string | undefined;
+      let parentAlert: string | undefined;
+
+      if (missingDirectories.length > 0) {
+        const missingDescription = missingDirectories.map(path => `'${path}'`).join(", ");
+        if (workingDirectory) {
+          workingDirectoryAgentNotice = `WARNING: 指定された workingDirectory ${missingDescription} は存在しません。'${workingDirectory}' にフォールバックしました。`;
+          parentAlert = `[mcp-tmux] workingDirectory ${missingDescription} が存在しないため '${workingDirectory}' にフォールバックしました。`;
+          operations.push(`Working directory fallback applied: ${missingDescription} -> ${workingDirectory}`);
+        } else {
+          workingDirectoryAgentNotice = `WARNING: 指定された workingDirectory ${missingDescription} は存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリで作業を継続します。`;
+          parentAlert = `[mcp-tmux] workingDirectory ${missingDescription} が存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリを利用します。`;
+          operations.push(`Working directory unresolved: ${missingDescription}`);
+        }
+      }
+
       if (workingDirectory) {
         await tmux.sendKeysToPane(newPaneId, buildCdCommand(workingDirectory));
         operations.push(`Changed directory to ${workingDirectory}`);
@@ -578,6 +651,10 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         }
       }
 
+      if (parentAlert) {
+        await tmux.sendKeysToPane(targetPane, parentAlert, { delayMs: 50 });
+      }
+
       const agentKey = input.agent as AgentKey | undefined;
       const presetCommand = agentKey ? defaultAgentCommands[agentKey] : undefined;
       const launchCommand = input.agentCommand ?? presetCommand;
@@ -589,9 +666,16 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push("No launch command supplied; pane left idle.");
       }
 
-      const baseDelay = input.initialMessageDelayMs ?? 500;
-      const enterDelay = Math.max(baseDelay, 200);
-      const communicationTip = `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。\n- 親pane通知 (MCP tmux ツール): execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")\n- 親pane通知 (tmux コマンド例): tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter\n- 本家ブランチ取り込み例: git fetch <本家リモート> && git merge <本家ブランチ>`;
+      const baseDelay = input.initialMessageDelayMs ?? 300;
+      const enterDelay = Math.max(baseDelay, 150);
+      const normalizedInitialMessage = normalizeAgentInput(input.initialMessage);
+      const workingDirectoryNoticeNormalized = normalizeAgentInput(workingDirectoryAgentNotice);
+      const communicationTip = normalizeAgentInput(
+        `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。
+親pane通知(MCP tmux ツール): execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")。
+親pane通知(tmux コマンド例): tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter。
+本家ブランチ取り込み例: git fetch <本家リモート> && git merge <本家ブランチ>`
+      );
 
       if (worktreeNotice) {
         if (baseDelay > 0) {
@@ -601,21 +685,32 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push("Posted worktree notice to agent CLI");
       }
 
-      if (input.initialMessage) {
+      if (workingDirectoryNoticeNormalized) {
+        const waitBeforeWarning = worktreeNotice ? 200 : baseDelay;
+        if (waitBeforeWarning > 0) {
+          await wait(waitBeforeWarning);
+        }
+        await tmux.sendKeysToPane(newPaneId, workingDirectoryNoticeNormalized, { delayMs: enterDelay });
+        operations.push("Posted working directory warning to agent CLI");
+      }
+
+      if (normalizedInitialMessage) {
         const waitBeforeInitial = worktreeNotice ? 200 : baseDelay;
         if (waitBeforeInitial > 0) {
           await wait(waitBeforeInitial);
         }
-        await tmux.sendKeysToPane(newPaneId, input.initialMessage, { delayMs: enterDelay });
+        await tmux.sendKeysToPane(newPaneId, normalizedInitialMessage, { delayMs: enterDelay });
         operations.push("Posted initial message to agent CLI");
       }
 
-      const waitBeforeTip = (input.initialMessage || worktreeNotice) ? 200 : baseDelay;
+      const waitBeforeTip = (normalizedInitialMessage || worktreeNotice || workingDirectoryNoticeNormalized) ? 200 : baseDelay;
       if (waitBeforeTip > 0) {
         await wait(waitBeforeTip);
       }
-      await tmux.sendKeysToPane(newPaneId, communicationTip, { delayMs: enterDelay });
-      operations.push("Posted communication tip to agent CLI");
+      if (communicationTip) {
+        await tmux.sendKeysToPane(newPaneId, communicationTip, { delayMs: enterDelay });
+        operations.push("Posted communication tip to agent CLI");
+      }
 
       const messageLines = [
         `New pane ${newPaneId} ready.`,
