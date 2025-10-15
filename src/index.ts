@@ -475,10 +475,11 @@ server.tool(
 // Launch agent in a new pane - Tool
 server.tool(
   "launch-agent-pane",
-`Split a tmux pane and launch an AI coding agent CLI (Codex/ClaudeCode/Gemini 等) を自動化します。
+`Split a tmux pane and launch an AI coding agent CLI (Codex/Claude/Gemini 等) を自動化します。
 ステップ: 1) targetPaneId 未指定時は target からアクティブ pane を取得
 2) 指定方向へ split し、新 pane をフォーカスおよびリネーム
 3) worktree オプション指定時は git worktree を ensure し、作成済みを再利用
+   (コンフリクトの危険がなければ worktree は省略して既存ディレクトリで作業してください)
 4) workingDirectory / environment / paneTitle を pane 内で先に整備
 5) agentCommand または agent プリセットをそのまま実行し、必要なら initialMessage を投げ込む
 完了後は capture-pane / list-panes などで進捗確認し、タスク完了時は kill-pane を呼び出してください。`,

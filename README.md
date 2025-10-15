@@ -55,23 +55,115 @@ The MCP server needs to know the shell only when executing commands, to properly
 
 ## Available Resources
 
-- `tmux://sessions` - List all tmux sessions
-- `tmux://pane/{paneId}` - View content of a specific tmux pane
-- `tmux://command/{commandId}/result` - Results from executed commands
+- `tmux://sessions` — list all tmux sessions
+- `tmux://pane/{paneId}` — view content of a specific tmux pane
+- `tmux://command/{commandId}/result` — results from executed commands
 
-## Available Tools
+## Available Tools and Parameters
 
-- `list-sessions` - List all active tmux sessions
-- `find-session` - Find a tmux session by name
-- `list-windows` - List windows in a tmux session
-- `list-panes` - List panes in a tmux window
-- `capture-pane` - Capture content from a tmux pane
-- `create-session` - Create a new tmux session
-- `create-window` - Create a new window in a tmux session
-- `split-pane` - Split a tmux pane horizontally or vertically with optional size
-- `kill-session` - Kill a tmux session by ID
-- `kill-window` - Kill a tmux window by ID
-- `kill-pane` - Kill a tmux pane by ID
-- `execute-command` - Execute a command in a tmux pane
-- `get-command-result` - Get the result of an executed command
+### list-sessions
+- 説明: 現在稼働中の tmux セッション一覧を返します
+- パラメーター: なし
 
+### find-session
+- 説明: 名前で tmux セッションを検索します
+- パラメーター
+  - `name` (string) セッション名
+
+### list-windows
+- 説明: 指定セッション内のウィンドウを列挙します
+- パラメーター
+  - `sessionId` (string) セッションID
+
+### list-panes
+- 説明: 指定ウィンドウ内のペインを列挙します
+- パラメーター
+  - `windowId` (string) ウィンドウID
+
+### capture-pane
+- 説明: ペイン内容を取得します
+- パラメーター
+  - `paneId` (string) ペインID
+  - `lines` (string, optional) 取得する行数
+  - `colors` (boolean, optional) ANSIカラー保持の有無
+
+### create-session
+- 説明: 新しい tmux セッションを作成します
+- パラメーター
+  - `name` (string) セッション名
+
+### create-window
+- 説明: 指定セッションに新しいウィンドウを作成します
+- パラメーター
+  - `sessionId` (string) セッションID
+  - `name` (string) ウィンドウ名
+
+### split-pane
+- 説明: 既存ペインを分割します
+- パラメーター
+  - `paneId` (string) 対象ペインID
+  - `direction` (`horizontal`|`vertical`, optional) 分割方向、既定は `vertical`
+  - `size` (number, optional) 新ペインの占有率 (1–99)
+
+### kill-session / kill-window / kill-pane
+- 説明: それぞれセッション、ウィンドウ、ペインを終了します
+- パラメーター
+  - `sessionId` / `windowId` / `paneId` (string)
+
+### execute-command
+- 説明: 指定ペインでコマンドを実行します
+- パラメーター
+  - `paneId` (string)
+  - `command` (string)
+  - `rawMode` (boolean, optional) マーカー無しで送るか
+  - `noEnter` (boolean, optional) Enter を送信せずキー列として扱うか
+
+### get-command-result
+- 説明: `execute-command` の結果を取得します
+- パラメーター
+  - `commandId` (string)
+
+### launch-agent-pane
+- 説明: ペインを分割し AI コーディング CLI (Codex / Claude / Gemini など) を起動します。コンフリクト危険がない場合は worktree オプションを省略し、既存ディレクトリで作業してください。
+- パラメーター
+  - `targetPaneId` (string, optional) 分割対象のペインID。省略時は `target`
+  - `target` (string, optional) tmux ターゲット (例: `session:window.pane`)
+  - `direction` (`horizontal`|`vertical`, optional) 分割方向、既定は `vertical`
+  - `size` (number, optional) 新ペインの占有率 (1–99)
+  - `agent` (`codex`|`claude`|`gemini`, optional) プリセットCLI名
+  - `agentCommand` (string, optional) 明示的に実行するコマンド
+  - `workingDirectory` (string, optional) 事前に移動するディレクトリ
+  - `paneTitle` (string, optional) 新ペインタイトル
+  - `focus` (boolean, optional) 分割後にフォーカスするか。既定は true
+  - `environment` (record, optional) `KEY: VALUE` 形式の環境変数
+  - `initialMessage` (string, optional) CLI 起動後に送る初回メッセージ
+  - `initialMessageDelayMs` (number, optional) 初回メッセージ前の待機 (ms)
+  - `worktree` (object, optional)
+    - `repoPath` (string)
+    - `branchName` (string)
+    - `worktreePath` (string, optional)
+    - `baseRef` (string, optional)
+    - `createBranch` (boolean, optional)
+    - `force` (boolean, optional)
+
+### list-worktrees
+- 説明: Git worktree 一覧を取得します
+- パラメーター
+  - `repoPath` (string)
+
+### create-worktree
+- 説明: 指定ブランチ向けに worktree を作成または再利用します
+- パラメーター
+  - `repoPath` (string)
+  - `branchName` (string)
+  - `worktreePath` (string, optional)
+  - `baseRef` (string, optional)
+  - `createBranch` (boolean, optional)
+  - `force` (boolean, optional)
+
+### remove-worktree
+- 説明: worktree を削除します。`force=true` は未コミット変更を失う恐れがあるため、必ず人間に確認してください。
+- パラメーター
+  - `repoPath` (string)
+  - `worktreePath` (string)
+  - `force` (boolean, optional)
