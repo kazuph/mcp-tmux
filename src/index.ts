@@ -482,7 +482,8 @@ server.tool(
    (コンフリクトの危険がなければ worktree は省略して既存ディレクトリで作業してください)
 4) workingDirectory / environment / paneTitle を pane 内で先に整備
 5) agentCommand または agent プリセットをそのまま実行し、必要なら initialMessage を投げ込む
-完了後は capture-pane / list-panes などで進捗確認し、タスク完了時は kill-pane を呼び出してください。`,
+完了後は capture-pane / list-panes などで進捗確認し、タスク完了時は kill-pane を呼び出してください。
+tips: 作業完了後は親に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトの有無を確認してください。`,
   {
     targetPaneId: z.string().optional().describe("Existing pane ID to split. If omitted, the active pane is used."),
     target: z.string().optional().describe("tmux target (session[:window[.pane]]) used to resolve the active pane when targetPaneId is not provided."),
@@ -590,7 +591,7 @@ server.tool(
 
       const baseDelay = input.initialMessageDelayMs ?? 500;
       const enterDelay = Math.max(baseDelay, 200);
-      const communicationTip = `TIP: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了通知を送ってください。\n- MCP tmux ツールが使える場合: execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")\n- tmux コマンド例: tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter`;
+      const communicationTip = `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。\n- 親pane通知 (MCP tmux ツール): execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")\n- 親pane通知 (tmux コマンド例): tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter\n- 本家ブランチ取り込み例: git fetch <本家リモート> && git merge <本家ブランチ>`;
 
       if (worktreeNotice) {
         if (baseDelay > 0) {
