@@ -5,6 +5,32 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as tmux from "./tmux.js";
+import * as git from "./git.js";
+
+const defaultAgentCommands = {
+  codex: "codex",
+  claudecode: "claudecode",
+  gemini: "gemini"
+} as const;
+
+type AgentKey = keyof typeof defaultAgentCommands;
+
+function validateEnvKey(key: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error(`Invalid environment variable name: ${key}`);
+  }
+}
+
+function buildExportCommand(key: string, value: string): string {
+  validateEnvKey(key);
+  const escaped = value.replace(/(["\\])/g, "\\$1");
+  return `export ${key}="${escaped}"`;
+}
+
+function buildCdCommand(path: string): string {
+  const escaped = path.replace(/(["\\])/g, "\\$1");
+  return `cd "${escaped}"`;
+}
 
 // Create MCP server
 const server = new McpServer({
@@ -435,6 +461,256 @@ server.tool(
         content: [{
           type: "text",
           text: `Error retrieving command result: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Launch agent in a new pane - Tool
+server.tool(
+  "launch-agent-pane",
+`Split a tmux pane and launch an AI coding agent CLI (Codex/ClaudeCode/Gemini 等) を自動化します。
+ステップ: 1) targetPaneId 未指定時は target からアクティブ pane を取得
+2) 指定方向へ split し、新 pane をフォーカスおよびリネーム
+3) worktree オプション指定時は git worktree を ensure し、作成済みを再利用
+4) workingDirectory / environment / paneTitle を pane 内で先に整備
+5) agentCommand または agent プリセットをそのまま実行し、必要なら initialMessage を投げ込む
+完了後は capture-pane / list-panes などで進捗確認し、タスク完了時は kill-pane を呼び出してください。`,
+  {
+    targetPaneId: z.string().optional().describe("Existing pane ID to split. If omitted, the active pane is used."),
+    target: z.string().optional().describe("tmux target (session[:window[.pane]]) used to resolve the active pane when targetPaneId is not provided."),
+    direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction. Defaults to 'vertical' (top/bottom)."),
+    size: z.number().min(1).max(99).optional().describe("Size of the new pane as a percentage (1-99)."),
+    agent: z.enum(["codex", "claudecode", "gemini"]).optional().describe("Preset agent CLI to launch."),
+    agentCommand: z.string().optional().describe("Explicit command to run in the new pane. Overrides the agent preset."),
+    workingDirectory: z.string().optional().describe("Directory to cd into before launching the agent. Defaults to the worktree path when worktree options are provided."),
+    paneTitle: z.string().optional().describe("Optional pane title to apply after creation."),
+    focus: z.boolean().optional().describe("Focus the new pane after creation. Defaults to true."),
+    environment: z.record(z.string()).optional().describe("Environment variables to export before launching the agent."),
+    initialMessage: z.string().optional().describe("Optional instruction to send to the agent CLI after it starts (例: タスク説明)。"),
+    initialMessageDelayMs: z.number().min(0).optional().describe("Delay in milliseconds before sending initialMessage. Defaults to 500."),
+    worktree: z.object({
+      repoPath: z.string().describe("Path inside the target git repository."),
+      branchName: z.string().describe("Branch name to use for the worktree."),
+      worktreePath: z.string().optional().describe("Directory for the worktree. Relative paths are resolved from the repo root."),
+      baseRef: z.string().optional().describe("Starting point for a new branch (requires createBranch=true)."),
+      createBranch: z.boolean().optional().describe("Create a new branch for the worktree. Defaults to false."),
+      force: z.boolean().optional().describe("Force worktree creation even if the branch is checked out elsewhere.")
+    }).optional().describe("Optional git worktree configuration.")
+  },
+  async (input) => {
+    try {
+      const direction = input.direction ?? 'vertical';
+      const targetPane = input.targetPaneId ?? await tmux.getActivePaneId(input.target);
+      const newPane = await tmux.splitPane(targetPane, direction, input.size);
+
+      if (!newPane) {
+        throw new Error(`Failed to create a new pane from target ${targetPane}`);
+      }
+
+      const newPaneId = newPane.id;
+      const operations: string[] = [];
+      const sizeSuffix = input.size ? `, size ${input.size}%` : "";
+      operations.push(`Split pane ${targetPane} -> ${newPaneId} (${direction}${sizeSuffix})`);
+
+      const shouldFocus = input.focus ?? true;
+      if (shouldFocus) {
+        await tmux.selectPane(newPaneId);
+        operations.push("Focused new pane");
+      }
+
+      const inferredTitle = input.paneTitle ?? (input.agent ? `Agent | ${input.agent.toUpperCase()}` : undefined);
+      if (inferredTitle) {
+        await tmux.renamePane(newPaneId, inferredTitle);
+        operations.push(`Set pane title to \"${inferredTitle}\"`);
+      }
+
+      let workingDirectory = input.workingDirectory;
+
+      if (input.worktree) {
+        const worktreeResult = await git.ensureWorktree({
+          repoPath: input.worktree.repoPath,
+          branchName: input.worktree.branchName,
+          worktreePath: input.worktree.worktreePath,
+          baseRef: input.worktree.baseRef,
+          createBranch: input.worktree.createBranch,
+          force: input.worktree.force
+        });
+
+        if (!workingDirectory) {
+          workingDirectory = worktreeResult.worktreePath;
+        }
+
+        if (worktreeResult.created) {
+          operations.push(`Created worktree at ${worktreeResult.worktreePath} (branch ${worktreeResult.branch})`);
+        } else if (worktreeResult.existingWorktree) {
+          const branchLabel = worktreeResult.existingWorktree.branch ?? worktreeResult.branch;
+          operations.push(`Reused existing worktree at ${worktreeResult.worktreePath} (branch ${branchLabel})`);
+        }
+      }
+
+      if (workingDirectory) {
+        await tmux.sendKeysToPane(newPaneId, buildCdCommand(workingDirectory));
+        operations.push(`Changed directory to ${workingDirectory}`);
+      }
+
+      if (input.environment) {
+        for (const [key, value] of Object.entries(input.environment)) {
+          const exportCommand = buildExportCommand(key, value);
+          await tmux.sendKeysToPane(newPaneId, exportCommand);
+          operations.push(`Exported ${key}`);
+        }
+      }
+
+      const agentKey = input.agent as AgentKey | undefined;
+      const presetCommand = agentKey ? defaultAgentCommands[agentKey] : undefined;
+      const launchCommand = input.agentCommand ?? presetCommand;
+
+      if (launchCommand) {
+        await tmux.sendKeysToPane(newPaneId, launchCommand);
+        operations.push(`Started command: ${launchCommand}`);
+      } else {
+        operations.push("No launch command supplied; pane left idle.");
+      }
+
+      if (input.initialMessage) {
+        const delayMs = input.initialMessageDelayMs ?? 500;
+        if (delayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        await tmux.sendKeysToPane(newPaneId, input.initialMessage);
+        operations.push("Posted initial message to agent CLI");
+      }
+
+      const messageLines = [
+        `New pane ${newPaneId} ready.`,
+        ...operations.map(item => `- ${item}`)
+      ];
+
+      return {
+        content: [{
+          type: "text",
+          text: messageLines.join("\n")
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error launching agent pane: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// List git worktrees - Tool
+server.tool(
+  "list-worktrees",
+  "List git worktrees for a repository path.",
+  {
+    repoPath: z.string().describe("Path inside the git repository.")
+  },
+  async ({ repoPath }) => {
+    try {
+      const worktrees = await git.listWorktrees(repoPath);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(worktrees, null, 2)
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error listing worktrees: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Create or reuse a git worktree - Tool
+server.tool(
+  "create-worktree",
+  "Create (or reuse) a git worktree for the specified branch.",
+  {
+    repoPath: z.string().describe("Path inside the git repository."),
+    branchName: z.string().describe("Branch name for the worktree."),
+    worktreePath: z.string().optional().describe("Directory for the worktree. Relative paths resolve from the repo root."),
+    baseRef: z.string().optional().describe("Starting point when creating a new branch (requires createBranch=true)."),
+    createBranch: z.boolean().optional().describe("Create a new branch for the worktree. Defaults to false."),
+    force: z.boolean().optional().describe("Force worktree creation even if the branch is checked out elsewhere.")
+  },
+  async ({ repoPath, branchName, worktreePath, baseRef, createBranch, force }) => {
+    try {
+      const result = await git.ensureWorktree({
+        repoPath,
+        branchName,
+        worktreePath,
+        baseRef,
+        createBranch,
+        force
+      });
+
+      const status = result.created
+        ? `Created worktree at ${result.worktreePath}`
+        : `Worktree already exists at ${result.worktreePath}`;
+
+      const details = {
+        repoPath: result.repoPath,
+        worktreePath: result.worktreePath,
+        branch: result.branch,
+        created: result.created,
+        existingWorktree: result.existingWorktree
+      };
+
+      return {
+        content: [{
+          type: "text",
+          text: `${status}\n\n${JSON.stringify(details, null, 2)}`
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating worktree: ${error}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Remove git worktree - Tool
+server.tool(
+  "remove-worktree",
+  "Remove a git worktree directory.",
+  {
+    repoPath: z.string().describe("Path inside the git repository."),
+    worktreePath: z.string().describe("Worktree directory to remove."),
+    force: z.boolean().optional().describe("Force removal (cleans even if worktree has changes).")
+  },
+  async ({ repoPath, worktreePath, force }) => {
+    try {
+      await git.removeWorktree({ repoPath, worktreePath, force });
+      return {
+        content: [{
+          type: "text",
+          text: `Removed worktree at ${worktreePath}`
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error removing worktree: ${error}`
         }],
         isError: true
       };

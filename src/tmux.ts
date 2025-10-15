@@ -4,6 +4,14 @@ import { v4 as uuidv4 } from 'uuid';
 
 const exec = promisify(execCallback);
 
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function escapeForTmux(value: string): string {
+  return value.replace(/'/g, "'\\''");
+}
+
 // Basic interfaces for tmux objects
 export interface TmuxSession {
   id: string;
@@ -233,6 +241,49 @@ export async function splitPane(
   return panes.length > 0 ? panes[panes.length - 1] : null;
 }
 
+export async function getActivePaneId(target?: string): Promise<string> {
+  const targetFlag = target ? ` -t '${escapeForTmux(target)}'` : '';
+  const paneId = await executeTmux(`display-message -p${targetFlag} '#{pane_id}'`);
+
+  if (!paneId) {
+    throw new Error("Unable to determine active tmux pane");
+  }
+
+  return paneId.trim();
+}
+
+export async function selectPane(paneId: string): Promise<void> {
+  await executeTmux(`select-pane -t '${escapeForTmux(paneId)}'`);
+}
+
+export async function renamePane(paneId: string, title: string): Promise<void> {
+  await executeTmux(`select-pane -t '${escapeForTmux(paneId)}' -T '${escapeForTmux(title)}'`);
+}
+
+export async function sendKeysToPane(
+  paneId: string,
+  text: string,
+  options?: { enter?: boolean; delayMs?: number }
+): Promise<void> {
+  const { enter = true, delayMs = 100 } = options ?? {};
+
+  const lines = text.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' '${escapeForTmux(line)}'`);
+    if (index < lines.length - 1) {
+      await delay(Math.max(delayMs, 0));
+      await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+    }
+  }
+
+  if (enter) {
+    await delay(Math.max(delayMs, 0));
+    await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+  }
+}
+
 // Map to track ongoing command executions
 const activeCommands = new Map<string, CommandExecution>();
 
@@ -361,4 +412,3 @@ function getEndMarkerText(): string {
     ? `${endMarkerPrefix}$status`
     : `${endMarkerPrefix}$?`;
 }
-
