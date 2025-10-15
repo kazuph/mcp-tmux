@@ -9,7 +9,7 @@ import * as git from "./git.js";
 
 const defaultAgentCommands = {
   codex: "codex",
-  claudecode: "claudecode",
+  claude: "claude",
   gemini: "gemini"
 } as const;
 
@@ -487,7 +487,7 @@ server.tool(
     target: z.string().optional().describe("tmux target (session[:window[.pane]]) used to resolve the active pane when targetPaneId is not provided."),
     direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction. Defaults to 'vertical' (top/bottom)."),
     size: z.number().min(1).max(99).optional().describe("Size of the new pane as a percentage (1-99)."),
-    agent: z.enum(["codex", "claudecode", "gemini"]).optional().describe("Preset agent CLI to launch."),
+    agent: z.enum(["codex", "claude", "gemini"]).optional().describe("Preset agent CLI to launch. 'claude' を指定すると CLI 名はデフォルトで 'claude' を使用します。'claude-code' など別名の CLI を使っている場合は agentCommand で上書きしてください。"),
     agentCommand: z.string().optional().describe("Explicit command to run in the new pane. Overrides the agent preset."),
     workingDirectory: z.string().optional().describe("Directory to cd into before launching the agent. Defaults to the worktree path when worktree options are provided."),
     paneTitle: z.string().optional().describe("Optional pane title to apply after creation."),
