@@ -32,6 +32,10 @@ function buildCdCommand(path: string): string {
   return `cd "${escaped}"`;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Create MCP server
 const server = new McpServer({
   name: "tmux-mcp",
@@ -529,6 +533,8 @@ server.tool(
 
       let workingDirectory = input.workingDirectory;
 
+      let worktreeNotice: string | undefined;
+
       if (input.worktree) {
         const worktreeResult = await git.ensureWorktree({
           repoPath: input.worktree.repoPath,
@@ -549,6 +555,8 @@ server.tool(
           const branchLabel = worktreeResult.existingWorktree.branch ?? worktreeResult.branch;
           operations.push(`Reused existing worktree at ${worktreeResult.worktreePath} (branch ${branchLabel})`);
         }
+
+        worktreeNotice = `NOTE: このpaneは worktree '${worktreeResult.worktreePath}' (branch ${worktreeResult.branch}) 上で動作しています。親paneとは別ディレクトリです。`;
       }
 
       if (workingDirectory) {
@@ -575,12 +583,23 @@ server.tool(
         operations.push("No launch command supplied; pane left idle.");
       }
 
-      if (input.initialMessage) {
-        const delayMs = input.initialMessageDelayMs ?? 500;
-        if (delayMs > 0) {
-          await new Promise(resolve => setTimeout(resolve, delayMs));
+      const baseDelay = input.initialMessageDelayMs ?? 500;
+      const enterDelay = Math.max(baseDelay, 200);
+
+      if (worktreeNotice) {
+        if (baseDelay > 0) {
+          await wait(baseDelay);
         }
-        await tmux.sendKeysToPane(newPaneId, input.initialMessage);
+        await tmux.sendKeysToPane(newPaneId, worktreeNotice, { delayMs: enterDelay });
+        operations.push("Posted worktree notice to agent CLI");
+      }
+
+      if (input.initialMessage) {
+        const waitBeforeInitial = worktreeNotice ? 200 : baseDelay;
+        if (waitBeforeInitial > 0) {
+          await wait(waitBeforeInitial);
+        }
+        await tmux.sendKeysToPane(newPaneId, input.initialMessage, { delayMs: enterDelay });
         operations.push("Posted initial message to agent CLI");
       }
 

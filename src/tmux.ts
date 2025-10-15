@@ -265,22 +265,26 @@ export async function sendKeysToPane(
   text: string,
   options?: { enter?: boolean; delayMs?: number }
 ): Promise<void> {
-  const { enter = true, delayMs = 100 } = options ?? {};
+  const { enter = true, delayMs = 200 } = options ?? {};
+  const wait = Math.max(delayMs, 0);
 
   const lines = text.split(/\r?\n/);
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
     await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' '${escapeForTmux(line)}'`);
+
     if (index < lines.length - 1) {
-      await delay(Math.max(delayMs, 0));
+      await delay(wait);
       await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+      await delay(wait);
     }
   }
 
   if (enter) {
-    await delay(Math.max(delayMs, 0));
+    await delay(wait);
     await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
+    await delay(wait);
   }
 }
 
