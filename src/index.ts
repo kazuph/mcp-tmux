@@ -519,6 +519,10 @@ server.tool(
       const sizeSuffix = input.size ? `, size ${input.size}%` : "";
       operations.push(`Split pane ${targetPane} -> ${newPaneId} (${direction}${sizeSuffix})`);
 
+      const parentAddress = await tmux.getPaneAddress(targetPane);
+      const parentPaneDisplay = `${parentAddress.sessionName || "?"}:${parentAddress.windowIndex || "?"}.${parentAddress.paneIndex || "?"}`;
+      operations.push(`Parent pane reference: ${parentPaneDisplay} (${targetPane})`);
+
       const shouldFocus = input.focus ?? true;
       if (shouldFocus) {
         await tmux.selectPane(newPaneId);
@@ -585,6 +589,7 @@ server.tool(
 
       const baseDelay = input.initialMessageDelayMs ?? 500;
       const enterDelay = Math.max(baseDelay, 200);
+      const communicationTip = `TIP: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了通知を送ってください。\n- MCP tmux ツールが使える場合: execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")\n- tmux コマンド例: tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter`;
 
       if (worktreeNotice) {
         if (baseDelay > 0) {
@@ -602,6 +607,13 @@ server.tool(
         await tmux.sendKeysToPane(newPaneId, input.initialMessage, { delayMs: enterDelay });
         operations.push("Posted initial message to agent CLI");
       }
+
+      const waitBeforeTip = (input.initialMessage || worktreeNotice) ? 200 : baseDelay;
+      if (waitBeforeTip > 0) {
+        await wait(waitBeforeTip);
+      }
+      await tmux.sendKeysToPane(newPaneId, communicationTip, { delayMs: enterDelay });
+      operations.push("Posted communication tip to agent CLI");
 
       const messageLines = [
         `New pane ${newPaneId} ready.`,

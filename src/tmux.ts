@@ -34,6 +34,13 @@ export interface TmuxPane {
   title: string;
 }
 
+export interface PaneAddress {
+  sessionName: string;
+  windowName: string;
+  windowIndex: string;
+  paneIndex: string;
+}
+
 interface CommandExecution {
   id: string;
   paneId: string;
@@ -286,6 +293,18 @@ export async function sendKeysToPane(
     await executeTmux(`send-keys -t '${escapeForTmux(paneId)}' Enter`);
     await delay(wait);
   }
+}
+
+export async function getPaneAddress(paneId: string): Promise<PaneAddress> {
+  const format = "#{session_name}\n#{window_name}\n#{window_index}\n#{pane_index}";
+  const output = await executeTmux(`display-message -p -t '${escapeForTmux(paneId)}' '${format}'`);
+  const [sessionName = "", windowName = "", windowIndex = "", paneIndex = ""] = output.split(/\r?\n/);
+  return {
+    sessionName: sessionName.trim(),
+    windowName: windowName.trim(),
+    windowIndex: windowIndex.trim(),
+    paneIndex: paneIndex.trim()
+  };
 }
 
 // Map to track ongoing command executions
