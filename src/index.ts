@@ -710,11 +710,11 @@ server.tool(
 // Remove git worktree - Tool
 server.tool(
   "remove-worktree",
-  "Remove a git worktree directory.",
+  "Remove a git worktree directory. force=true を使う場合は未コミット変更が失われる可能性があるため、必ず人間に確認してください。",
   {
     repoPath: z.string().describe("Path inside the git repository."),
     worktreePath: z.string().describe("Worktree directory to remove."),
-    force: z.boolean().optional().describe("Force removal (cleans even if worktree has changes).")
+    force: z.boolean().optional().describe("Force removal (cleans even if worktree has changes). 必ず人間に確認してください。")
   },
   async ({ repoPath, worktreePath, force }) => {
     try {
