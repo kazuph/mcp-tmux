@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "child_process";
 import { promisify } from "util";
-import { isAbsolute, normalize, resolve } from "path";
+import { basename, isAbsolute, join, normalize, resolve } from "path";
 
 const execFile = promisify(execFileCallback);
 
@@ -153,7 +153,7 @@ export async function ensureWorktree(options: EnsureWorktreeOptions): Promise<En
   const repoRoot = await resolveRepoPath(repoPath);
   const candidatePath = worktreePath
     ? (isAbsolute(worktreePath) ? normalize(worktreePath) : normalize(resolve(repoRoot, worktreePath)))
-    : normalize(resolve(repoRoot, "..", branchName));
+    : computeDefaultWorktreePath(repoRoot, branchName);
 
   const worktrees = await listWorktrees(repoRoot);
   const existingByPath = worktrees.find(entry => normalize(entry.path) === candidatePath);
@@ -200,6 +200,13 @@ export async function ensureWorktree(options: EnsureWorktreeOptions): Promise<En
     branch: branchName,
     created: true
   };
+}
+
+function computeDefaultWorktreePath(repoRoot: string, branchName: string): string {
+  const repoName = basename(repoRoot);
+  const worktreeBase = join(repoRoot, ".worktrees", branchName);
+  const fallbackPath = join(worktreeBase, repoName);
+  return normalize(fallbackPath);
 }
 
 export async function removeWorktree(options: RemoveWorktreeOptions): Promise<void> {

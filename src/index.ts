@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { stat } from 'node:fs/promises';
+import { stat, copyFile, mkdir } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { dirname, resolve } from 'node:path';
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -65,6 +66,44 @@ function normalizeAgentInput(text?: string): string | undefined {
     .trim();
 
   return normalized.length > 0 ? normalized : undefined;
+}
+
+async function copyFilesIntoWorktree(options: {
+  repoRoot: string;
+  worktreePath: string;
+  files?: string[];
+}): Promise<{ copied: string[]; failed: { path: string; error: string; }[] }> {
+  const results = {
+    copied: [] as string[],
+    failed: [] as { path: string; error: string; }[]
+  };
+
+  if (!options.files || options.files.length === 0) {
+    return results;
+  }
+
+  for (const relativePath of options.files) {
+    const trimmed = relativePath.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const sourcePath = resolve(options.repoRoot, trimmed);
+    const destinationPath = resolve(options.worktreePath, trimmed);
+
+    try {
+      await mkdir(dirname(destinationPath), { recursive: true });
+      await copyFile(sourcePath, destinationPath);
+      results.copied.push(trimmed);
+    } catch (error: any) {
+      results.failed.push({
+        path: trimmed,
+        error: error?.message ?? String(error)
+      });
+    }
+  }
+
+  return results;
 }
 
 // Create MCP server
@@ -531,10 +570,11 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
     worktree: z.object({
       repoPath: z.string().describe("Path inside the target git repository."),
       branchName: z.string().describe("Branch name to use for the worktree."),
-      worktreePath: z.string().optional().describe("Directory for the worktree. Relative paths are resolved from the repo root."),
+      worktreePath: z.string().optional().describe("Directory for the worktree. Relative paths are resolved from the repo root. 未指定時は <repo>/.worktrees/<branch>/<repo名> に作成されます。"),
       baseRef: z.string().optional().describe("Starting point for a new branch (requires createBranch=true)."),
       createBranch: z.boolean().optional().describe("Create a new branch for the worktree. Defaults to false."),
-      force: z.boolean().optional().describe("Force worktree creation even if the branch is checked out elsewhere.")
+      force: z.boolean().optional().describe("Force worktree creation even if the branch is checked out elsewhere."),
+      envFiles: z.array(z.string()).optional().describe("作成後に worktree へコピーしたいファイルパスのリスト。例: '.env', '.dev.vars', 'apps/hoge-app/.env'。モノレポでは正しい相対パスを必ず指定してください。")
     }).optional().describe("Optional git worktree configuration.")
   },
   async (input) => {
@@ -622,18 +662,18 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         workingDirectory = undefined;
       }
 
-      let workingDirectoryAgentNotice: string | undefined;
-      let parentAlert: string | undefined;
+      const agentNotices: string[] = [];
+      const parentAlerts: string[] = [];
 
       if (missingDirectories.length > 0) {
         const missingDescription = missingDirectories.map(path => `'${path}'`).join(", ");
         if (workingDirectory) {
-          workingDirectoryAgentNotice = `WARNING: 指定された workingDirectory ${missingDescription} は存在しません。'${workingDirectory}' にフォールバックしました。`;
-          parentAlert = `[mcp-tmux] workingDirectory ${missingDescription} が存在しないため '${workingDirectory}' にフォールバックしました。`;
+          agentNotices.push(`WARNING: 指定された workingDirectory ${missingDescription} は存在しません。'${workingDirectory}' にフォールバックしました。`);
+          parentAlerts.push(`[mcp-tmux] workingDirectory ${missingDescription} が存在しないため '${workingDirectory}' にフォールバックしました。`);
           operations.push(`Working directory fallback applied: ${missingDescription} -> ${workingDirectory}`);
         } else {
-          workingDirectoryAgentNotice = `WARNING: 指定された workingDirectory ${missingDescription} は存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリで作業を継続します。`;
-          parentAlert = `[mcp-tmux] workingDirectory ${missingDescription} が存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリを利用します。`;
+          agentNotices.push(`WARNING: 指定された workingDirectory ${missingDescription} は存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリで作業を継続します。`);
+          parentAlerts.push(`[mcp-tmux] workingDirectory ${missingDescription} が存在せず、フォールバック先も見つかりません。親paneのカレントディレクトリを利用します。`);
           operations.push(`Working directory unresolved: ${missingDescription}`);
         }
       }
@@ -651,8 +691,30 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         }
       }
 
-      if (parentAlert) {
-        await tmux.sendKeysToPane(targetPane, parentAlert, { delayMs: 50 });
+      let envCopyResult: { copied: string[]; failed: { path: string; error: string; }[] } | undefined;
+      if (worktreeResult && input.worktree?.envFiles && input.worktree.envFiles.length > 0) {
+        envCopyResult = await copyFilesIntoWorktree({
+          repoRoot: worktreeResult.repoPath,
+          worktreePath: worktreeResult.worktreePath,
+          files: input.worktree.envFiles
+        });
+
+        if (envCopyResult.copied.length > 0) {
+          operations.push(`Copied to worktree: ${envCopyResult.copied.join(", ")}`);
+        }
+
+        if (envCopyResult.failed.length > 0) {
+          const failedList = envCopyResult.failed.map(entry => `${entry.path} (${entry.error})`).join(", ");
+          agentNotices.push(`WARNING: 一部のファイルを worktree にコピーできませんでした: ${failedList}。モノレポの場合は相対パスが正しいか再確認してください。`);
+          parentAlerts.push(`[mcp-tmux] worktree へのファイルコピーに失敗: ${failedList}。相対パス設定を確認してください。`);
+          operations.push(`Worktree copy failures: ${failedList}`);
+        }
+      }
+
+      if (parentAlerts.length > 0) {
+        for (const alert of parentAlerts) {
+          await tmux.sendKeysToPane(targetPane, alert, { delayMs: 50 });
+        }
       }
 
       const agentKey = input.agent as AgentKey | undefined;
@@ -669,7 +731,7 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
       const baseDelay = input.initialMessageDelayMs ?? 300;
       const enterDelay = Math.max(baseDelay, 150);
       const normalizedInitialMessage = normalizeAgentInput(input.initialMessage);
-      const workingDirectoryNoticeNormalized = normalizeAgentInput(workingDirectoryAgentNotice);
+      const agentNoticesNormalized = normalizeAgentInput(agentNotices.join('\n'));
       const communicationTip = normalizeAgentInput(
         `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。
 親pane通知(MCP tmux ツール): execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")。
@@ -685,13 +747,13 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push("Posted worktree notice to agent CLI");
       }
 
-      if (workingDirectoryNoticeNormalized) {
+      if (agentNoticesNormalized) {
         const waitBeforeWarning = worktreeNotice ? 200 : baseDelay;
         if (waitBeforeWarning > 0) {
           await wait(waitBeforeWarning);
         }
-        await tmux.sendKeysToPane(newPaneId, workingDirectoryNoticeNormalized, { delayMs: enterDelay });
-        operations.push("Posted working directory warning to agent CLI");
+        await tmux.sendKeysToPane(newPaneId, agentNoticesNormalized, { delayMs: enterDelay });
+        operations.push("Posted agent warnings to agent CLI");
       }
 
       if (normalizedInitialMessage) {
@@ -703,7 +765,7 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push("Posted initial message to agent CLI");
       }
 
-      const waitBeforeTip = (normalizedInitialMessage || worktreeNotice || workingDirectoryNoticeNormalized) ? 200 : baseDelay;
+      const waitBeforeTip = (normalizedInitialMessage || worktreeNotice || agentNoticesNormalized) ? 200 : baseDelay;
       if (waitBeforeTip > 0) {
         await wait(waitBeforeTip);
       }
