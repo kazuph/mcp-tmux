@@ -695,6 +695,10 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         operations.push(`Changed directory to ${workingDirectory}`);
       }
 
+      const parentPaneEnvExport = buildExportCommand("MCP_PARENT_PANE", targetPane);
+      await tmux.sendKeysToPane(newPaneId, parentPaneEnvExport);
+      operations.push("Exported MCP_PARENT_PANE");
+
       if (input.environment) {
         for (const [key, value] of Object.entries(input.environment)) {
           const exportCommand = buildExportCommand(key, value);
