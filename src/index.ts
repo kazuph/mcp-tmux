@@ -18,6 +18,8 @@ const defaultAgentCommands = {
 
 type AgentKey = keyof typeof defaultAgentCommands;
 
+const defaultParentPaneId = process.env.TMUX_PANE;
+
 function validateEnvKey(key: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
     throw new Error(`Invalid environment variable name: ${key}`);
@@ -580,7 +582,17 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
   async (input) => {
     try {
       const direction = input.direction ?? 'vertical';
-      const targetPane = input.targetPaneId ?? await tmux.getActivePaneId(input.target);
+
+      let targetPane: string;
+      if (input.targetPaneId) {
+        targetPane = input.targetPaneId;
+      } else if (input.target) {
+        targetPane = await tmux.getActivePaneId(input.target);
+      } else if (defaultParentPaneId) {
+        targetPane = defaultParentPaneId;
+      } else {
+        targetPane = await tmux.getActivePaneId();
+      }
       const newPane = await tmux.splitPane(targetPane, direction, input.size);
 
       if (!newPane) {
