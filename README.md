@@ -137,6 +137,7 @@ The MCP server needs to know the shell only when executing commands, to properly
   - `focus` (boolean, optional) 分割後にフォーカスするか。既定は true
   - `environment` (record, optional) `KEY: VALUE` 形式の環境変数
   - `initialMessage` (string, optional) CLI 起動後に送る初回メッセージ
+  - Codexプリセット使用時は初回メッセージがある場合 `codex exec "<prompt>"` の形式で起動し、CLI 起動後に追加の自動送信は行いません
   - `initialMessageDelayMs` (number, optional) 初回メッセージ前の待機 (ms)
   - `worktree` (object, optional)
     - `repoPath` (string)

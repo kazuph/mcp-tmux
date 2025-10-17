@@ -215,7 +215,8 @@ export async function killPane(paneId: string): Promise<void> {
 export async function splitPane(
   targetPaneId: string,
   direction: 'horizontal' | 'vertical' = 'vertical',
-  size?: number
+  size?: number,
+  options?: { cwd?: string }
 ): Promise<TmuxPane | null> {
   // Build the split-window command
   let splitCommand = 'split-window';
@@ -227,13 +228,17 @@ export async function splitPane(
     splitCommand += ' -v';
   }
 
-  // Add target pane
-  splitCommand += ` -t '${targetPaneId}'`;
-
   // Add size if specified (as percentage)
   if (size !== undefined && size > 0 && size < 100) {
     splitCommand += ` -p ${size}`;
   }
+
+  if (options?.cwd) {
+    splitCommand += ` -c '${escapeForTmux(options.cwd)}'`;
+  }
+
+  // Add target pane
+  splitCommand += ` -t '${targetPaneId}'`;
 
   // Execute the split command
   await executeTmux(splitCommand);
