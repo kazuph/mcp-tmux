@@ -37,12 +37,65 @@ function buildCdCommand(path: string): string {
   return `cd "${escaped}"`;
 }
 
-function buildCodexExecCommand(prompt?: string): string {
-  const base = "codex exec";
+function buildCodexCommand(prompt?: string): string {
+  const base = "codex";
   if (prompt && prompt.length > 0) {
     return `${base} ${JSON.stringify(prompt)}`;
   }
   return base;
+}
+
+async function detectCodexStartupIssue(options: { paneId: string; captureDelayMs?: number; captureLines?: number; }): Promise<{ issue: boolean; snippet?: string; }> {
+  const delayMs = options.captureDelayMs ?? 1500;
+  if (delayMs > 0) {
+    await wait(delayMs);
+  }
+
+  try {
+    const lines = options.captureLines ?? 160;
+    const rawOutput = await tmux.capturePaneContent(options.paneId, lines);
+    const normalized = rawOutput.toLowerCase();
+    const errorPatterns = [
+      "error:",
+      "unexpected status",
+      "request timed out",
+      "timed out after",
+      "unsupported model"
+    ];
+
+    const issueDetected = errorPatterns.some(pattern => normalized.includes(pattern));
+
+    return {
+      issue: issueDetected,
+      snippet: issueDetected ? rawOutput.split('\n').slice(-20).join('\n') : undefined
+    };
+  } catch {
+    return { issue: false };
+  }
+}
+
+async function recoverCodexPane(options: { paneId: string; prompt?: string; captureDelayMs?: number; captureLines?: number; }): Promise<{ restarted: boolean; snippet?: string; }> {
+  const detection = await detectCodexStartupIssue({
+    paneId: options.paneId,
+    captureDelayMs: options.captureDelayMs,
+    captureLines: options.captureLines
+  });
+
+  if (!detection.issue) {
+    return { restarted: false };
+  }
+
+  await tmux.sendKeysToPane(options.paneId, "/quit");
+  await wait(600);
+
+  const retryCommand = buildCodexCommand(options.prompt);
+  await tmux.sendKeysToPane(options.paneId, retryCommand);
+  await wait(400);
+
+  return {
+    restarted: true,
+    snippet: detection.snippet
+  };
 }
 
 function wait(ms: number): Promise<void> {
@@ -748,21 +801,22 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
       let launchCommand = input.agentCommand ?? presetCommand;
       const isCodexAgent = agentKey === 'codex';
       const usingPresetCodexCommand = isCodexAgent && !input.agentCommand;
+      let codexPromptForLaunch = normalizedInitialMessage;
 
       if (usingPresetCodexCommand) {
-        const codexPrompt = normalizedInitialMessage;
-        launchCommand = buildCodexExecCommand(codexPrompt);
+        launchCommand = buildCodexCommand(codexPromptForLaunch);
         normalizedInitialMessage = undefined;
-        operations.push(codexPrompt
-          ? "Prepared Codex exec launch with inline prompt."
-          : "Prepared Codex exec launch without prompt.");
+        operations.push(codexPromptForLaunch
+          ? "Prepared Codex launch with inline prompt."
+          : "Prepared Codex launch without prompt argument.");
       } else if (isCodexAgent && normalizedInitialMessage) {
         operations.push("Suppressed initial prompt for Codex to avoid premature input.");
+        codexPromptForLaunch = normalizedInitialMessage;
         normalizedInitialMessage = undefined;
       }
 
       const agentNoticesNormalized = normalizeAgentInput(agentNotices.join('\n'));
-      const skipPostLaunchMessaging = isCodexAgent;
+      const skipPostLaunchMessaging = isCodexAgent && !input.agentCommand;
 
       if (skipPostLaunchMessaging && worktreeNotice) {
         parentAlerts.push(`[mcp-tmux] ${worktreeNotice}`);
@@ -774,14 +828,30 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         }
       }
 
+      const baseDelay = input.initialMessageDelayMs ?? 300;
+
       if (launchCommand) {
         await tmux.sendKeysToPane(newPaneId, launchCommand);
         operations.push(`Started command: ${launchCommand}`);
+
+        if (isCodexAgent && !input.agentCommand) {
+          const recovery = await recoverCodexPane({
+            paneId: newPaneId,
+            prompt: codexPromptForLaunch,
+            captureDelayMs: Math.max(baseDelay, 1200)
+          });
+
+          if (recovery.restarted) {
+            operations.push("Detected Codex startup error; issued /quit and retried launch.");
+            if (recovery.snippet) {
+              parentAlerts.push(`[mcp-tmux] Codex CLI startup error detected (auto-retry triggered).`);
+            }
+          }
+        }
       } else {
         operations.push("No launch command supplied; pane left idle.");
       }
 
-      const baseDelay = input.initialMessageDelayMs ?? 300;
       const enterDelay = Math.max(baseDelay, 150);
       const communicationTip = normalizeAgentInput(
         `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。
