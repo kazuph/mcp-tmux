@@ -37,6 +37,67 @@ function buildCdCommand(path: string): string {
   return `cd "${escaped}"`;
 }
 
+function buildCodexCommand(prompt?: string): string {
+  const base = "codex";
+  if (prompt && prompt.length > 0) {
+    return `${base} ${JSON.stringify(prompt)}`;
+  }
+  return base;
+}
+
+async function detectCodexStartupIssue(options: { paneId: string; captureDelayMs?: number; captureLines?: number; }): Promise<{ issue: boolean; snippet?: string; }> {
+  const delayMs = options.captureDelayMs ?? 1500;
+  if (delayMs > 0) {
+    await wait(delayMs);
+  }
+
+  try {
+    const lines = options.captureLines ?? 160;
+    const rawOutput = await tmux.capturePaneContent(options.paneId, lines);
+    const normalized = rawOutput.toLowerCase();
+    const errorPatterns = [
+      "error:",
+      "unexpected status",
+      "request timed out",
+      "timed out after",
+      "unsupported model"
+    ];
+
+    const issueDetected = errorPatterns.some(pattern => normalized.includes(pattern));
+
+    return {
+      issue: issueDetected,
+      snippet: issueDetected ? rawOutput.split('\n').slice(-20).join('\n') : undefined
+    };
+  } catch {
+    return { issue: false };
+  }
+}
+
+async function recoverCodexPane(options: { paneId: string; prompt?: string; captureDelayMs?: number; captureLines?: number; }): Promise<{ restarted: boolean; snippet?: string; }> {
+  const detection = await detectCodexStartupIssue({
+    paneId: options.paneId,
+    captureDelayMs: options.captureDelayMs,
+    captureLines: options.captureLines
+  });
+
+  if (!detection.issue) {
+    return { restarted: false };
+  }
+
+  await tmux.sendKeysToPane(options.paneId, "/quit");
+  await wait(600);
+
+  const retryCommand = buildCodexCommand(options.prompt);
+  await tmux.sendKeysToPane(options.paneId, retryCommand);
+  await wait(400);
+
+  return {
+    restarted: true,
+    snippet: detection.snippet
+  };
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -593,38 +654,10 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
       } else {
         targetPane = await tmux.getActivePaneId();
       }
-      const newPane = await tmux.splitPane(targetPane, direction, input.size);
 
-      if (!newPane) {
-        throw new Error(`Failed to create a new pane from target ${targetPane}`);
-      }
-
-      const newPaneId = newPane.id;
       const operations: string[] = [];
-      const sizeSuffix = input.size ? `, size ${input.size}%` : "";
-      operations.push(`Split pane ${targetPane} -> ${newPaneId} (${direction}${sizeSuffix})`);
-
-      const parentAddress = await tmux.getPaneAddress(targetPane);
-      const parentPaneDisplay = `${parentAddress.sessionName || "?"}:${parentAddress.windowIndex || "?"}.${parentAddress.paneIndex || "?"}`;
-      operations.push(`Parent pane reference: ${parentPaneDisplay} (${targetPane})`);
-
-      const shouldFocus = input.focus ?? true;
-      if (shouldFocus) {
-        await tmux.selectPane(newPaneId);
-        operations.push("Focused new pane");
-      }
-
-      const inferredTitle = input.paneTitle
-        ?? (input.agentCommand ? `Agent | ${input.agentCommand.toUpperCase()}`
-          : input.agent ? `Agent | ${input.agent.toUpperCase()}`
-          : undefined);
-      if (inferredTitle) {
-        await tmux.renamePane(newPaneId, inferredTitle);
-        operations.push(`Set pane title to \"${inferredTitle}\"`);
-      }
 
       let workingDirectory = input.workingDirectory;
-
       let worktreeNotice: string | undefined;
       let worktreeResult: EnsureWorktreeResult | undefined;
 
@@ -690,9 +723,43 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         }
       }
 
+      const splitOptions = workingDirectory ? { cwd: workingDirectory } : undefined;
+      const newPane = await tmux.splitPane(targetPane, direction, input.size, splitOptions);
+
+      if (!newPane) {
+        throw new Error(`Failed to create a new pane from target ${targetPane}`);
+      }
+
+      const newPaneId = newPane.id;
+      const sizeSuffix = input.size ? `, size ${input.size}%` : "";
+      operations.push(`Split pane ${targetPane} -> ${newPaneId} (${direction}${sizeSuffix})`);
+
+      const parentAddress = await tmux.getPaneAddress(targetPane);
+      const parentPaneDisplay = `${parentAddress.sessionName || "?"}:${parentAddress.windowIndex || "?"}.${parentAddress.paneIndex || "?"}`;
+      operations.push(`Parent pane reference: ${parentPaneDisplay} (${targetPane})`);
+
+      const shouldFocus = input.focus ?? true;
+      if (shouldFocus) {
+        await tmux.selectPane(newPaneId);
+        operations.push("Focused new pane");
+      }
+
+      const inferredTitle = input.paneTitle
+        ?? (input.agentCommand ? `Agent | ${input.agentCommand.toUpperCase()}`
+          : input.agent ? `Agent | ${input.agent.toUpperCase()}`
+          : undefined);
+      if (inferredTitle) {
+        await tmux.renamePane(newPaneId, inferredTitle);
+        operations.push(`Set pane title to \"${inferredTitle}\"`);
+      }
+
       if (workingDirectory) {
-        await tmux.sendKeysToPane(newPaneId, buildCdCommand(workingDirectory));
-        operations.push(`Changed directory to ${workingDirectory}`);
+        if (splitOptions) {
+          operations.push(`Opened pane with working directory ${workingDirectory}`);
+        } else {
+          await tmux.sendKeysToPane(newPaneId, buildCdCommand(workingDirectory));
+          operations.push(`Changed directory to ${workingDirectory}`);
+        }
       }
 
       const parentPaneEnvExport = buildExportCommand("MCP_PARENT_PANE", targetPane);
@@ -727,27 +794,65 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
         }
       }
 
+      let normalizedInitialMessage = normalizeAgentInput(input.initialMessage);
+
+      const agentKey = input.agent as AgentKey | undefined;
+      const presetCommand = agentKey ? defaultAgentCommands[agentKey] : undefined;
+      let launchCommand = input.agentCommand ?? presetCommand;
+      const isCodexAgent = agentKey === 'codex';
+      const usingPresetCodexCommand = isCodexAgent && !input.agentCommand;
+      let codexPromptForLaunch = normalizedInitialMessage;
+
+      if (usingPresetCodexCommand) {
+        launchCommand = buildCodexCommand(codexPromptForLaunch);
+        normalizedInitialMessage = undefined;
+        operations.push(codexPromptForLaunch
+          ? "Prepared Codex launch with inline prompt."
+          : "Prepared Codex launch without prompt argument.");
+      } else if (isCodexAgent && normalizedInitialMessage) {
+        operations.push("Suppressed initial prompt for Codex to avoid premature input.");
+        codexPromptForLaunch = normalizedInitialMessage;
+        normalizedInitialMessage = undefined;
+      }
+
+      const agentNoticesNormalized = normalizeAgentInput(agentNotices.join('\n'));
+      const skipPostLaunchMessaging = isCodexAgent && !input.agentCommand;
+
+      if (skipPostLaunchMessaging && worktreeNotice) {
+        parentAlerts.push(`[mcp-tmux] ${worktreeNotice}`);
+      }
+
       if (parentAlerts.length > 0) {
         for (const alert of parentAlerts) {
           await tmux.sendKeysToPane(targetPane, alert, { delayMs: 50 });
         }
       }
 
-      const agentKey = input.agent as AgentKey | undefined;
-      const presetCommand = agentKey ? defaultAgentCommands[agentKey] : undefined;
-      const launchCommand = input.agentCommand ?? presetCommand;
+      const baseDelay = input.initialMessageDelayMs ?? 300;
 
       if (launchCommand) {
         await tmux.sendKeysToPane(newPaneId, launchCommand);
         operations.push(`Started command: ${launchCommand}`);
+
+        if (isCodexAgent && !input.agentCommand) {
+          const recovery = await recoverCodexPane({
+            paneId: newPaneId,
+            prompt: codexPromptForLaunch,
+            captureDelayMs: Math.max(baseDelay, 1200)
+          });
+
+          if (recovery.restarted) {
+            operations.push("Detected Codex startup error; issued /quit and retried launch.");
+            if (recovery.snippet) {
+              parentAlerts.push(`[mcp-tmux] Codex CLI startup error detected (auto-retry triggered).`);
+            }
+          }
+        }
       } else {
         operations.push("No launch command supplied; pane left idle.");
       }
 
-      const baseDelay = input.initialMessageDelayMs ?? 300;
       const enterDelay = Math.max(baseDelay, 150);
-      const normalizedInitialMessage = normalizeAgentInput(input.initialMessage);
-      const agentNoticesNormalized = normalizeAgentInput(agentNotices.join('\n'));
       const communicationTip = normalizeAgentInput(
         `tips: 作業完了後は親pane ${parentPaneDisplay} (${targetPane}) に完了報告し、本家ブランチ（main とは限りません）を取り込んでコンフリクトがないか確認してください。
 親pane通知(MCP tmux ツール): execute-command (paneId '${targetPane}', command "tmux send-keys -t ${targetPane} '[${newPaneId}] 完了しました' Enter")。
@@ -755,39 +860,51 @@ tips: 作業完了後は親に完了報告し、本家ブランチ（main とは
 本家ブランチ取り込み例: git fetch <本家リモート> && git merge <本家ブランチ>`
       );
 
-      if (worktreeNotice) {
-        if (baseDelay > 0) {
-          await wait(baseDelay);
+      if (skipPostLaunchMessaging) {
+        if (worktreeNotice) {
+          operations.push("Skipped worktree notice to keep Codex startup clean.");
         }
-        await tmux.sendKeysToPane(newPaneId, worktreeNotice, { delayMs: enterDelay });
-        operations.push("Posted worktree notice to agent CLI");
-      }
-
-      if (agentNoticesNormalized) {
-        const waitBeforeWarning = worktreeNotice ? 200 : baseDelay;
-        if (waitBeforeWarning > 0) {
-          await wait(waitBeforeWarning);
+        if (agentNoticesNormalized) {
+          operations.push("Skipped agent warnings to keep Codex startup clean.");
         }
-        await tmux.sendKeysToPane(newPaneId, agentNoticesNormalized, { delayMs: enterDelay });
-        operations.push("Posted agent warnings to agent CLI");
-      }
-
-      if (normalizedInitialMessage) {
-        const waitBeforeInitial = worktreeNotice ? 200 : baseDelay;
-        if (waitBeforeInitial > 0) {
-          await wait(waitBeforeInitial);
+        if (communicationTip) {
+          operations.push("Skipped communication tip to keep Codex startup clean.");
         }
-        await tmux.sendKeysToPane(newPaneId, normalizedInitialMessage, { delayMs: enterDelay });
-        operations.push("Posted initial message to agent CLI");
-      }
+      } else {
+        if (worktreeNotice) {
+          if (baseDelay > 0) {
+            await wait(baseDelay);
+          }
+          await tmux.sendKeysToPane(newPaneId, worktreeNotice, { delayMs: enterDelay });
+          operations.push("Posted worktree notice to agent CLI");
+        }
 
-      const waitBeforeTip = (normalizedInitialMessage || worktreeNotice || agentNoticesNormalized) ? 200 : baseDelay;
-      if (waitBeforeTip > 0) {
-        await wait(waitBeforeTip);
-      }
-      if (communicationTip) {
-        await tmux.sendKeysToPane(newPaneId, communicationTip, { delayMs: enterDelay });
-        operations.push("Posted communication tip to agent CLI");
+        if (agentNoticesNormalized) {
+          const waitBeforeWarning = worktreeNotice ? 200 : baseDelay;
+          if (waitBeforeWarning > 0) {
+            await wait(waitBeforeWarning);
+          }
+          await tmux.sendKeysToPane(newPaneId, agentNoticesNormalized, { delayMs: enterDelay });
+          operations.push("Posted agent warnings to agent CLI");
+        }
+
+        if (normalizedInitialMessage) {
+          const waitBeforeInitial = worktreeNotice ? 200 : baseDelay;
+          if (waitBeforeInitial > 0) {
+            await wait(waitBeforeInitial);
+          }
+          await tmux.sendKeysToPane(newPaneId, normalizedInitialMessage, { delayMs: enterDelay });
+          operations.push("Posted initial message to agent CLI");
+        }
+
+        const waitBeforeTip = (normalizedInitialMessage || worktreeNotice || agentNoticesNormalized) ? 200 : baseDelay;
+        if (waitBeforeTip > 0) {
+          await wait(waitBeforeTip);
+        }
+        if (communicationTip) {
+          await tmux.sendKeysToPane(newPaneId, communicationTip, { delayMs: enterDelay });
+          operations.push("Posted communication tip to agent CLI");
+        }
       }
 
       const messageLines = [
